@@ -5,35 +5,40 @@
 
 EXEC SQL INCLUDE svr_bank.h;
 
-int connect_db(char* db_sid, char* conn_name)
+void access_account(TPSVCINFO *msg, FBUF *sndbuf, char* db_sid, char* conn_name, char* user_id)
 {
-	char username[16];
+	char tmp[128];
+	char dbaname[16];
 	char password[16];
 
 	if (strcmp(db_sid, "bankA") == 0)
 	{
-		sprintf(username, BANKA_DBA_NAME);
+		sprintf(dbaname, BANKA_DBA_NAME);
 		sprintf(password, BANKA_DBA_PWD);
 		sprintf(conn_name, "bankA");
 	}
 	else if (strcmp(db_sid, "bankB") == 0)
 	{
-		sprintf(username, BANKB_DBA_NAME);
+		sprintf(dbaname, BANKB_DBA_NAME);
 		sprintf(password, BANKB_DBA_PWD);
 		sprintf(conn_name, "bankB");
 	}
 	else
 	{
-		return ERR_UnknownBANK;
+		sprintf(tmp, "[%s] Failed [Such bank name (%s) does not exist]", msg->name, db_sid);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 	}
 
-	EXEC SQL CONNECT :username IDENTIFIED BY :password AT :conn_name USING :db_sid;
+	EXEC SQL CONNECT :dbaname IDENTIFIED BY :password AT :conn_name USING :db_sid;
 
-	return sqlca.sqlcode;
-}
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, db_sid, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
 
-int check_id(char* user_id, char* conn_name)
-{
 	int cnt;
 
 	EXEC SQL AT :conn_name SELECT COUNT(*)
@@ -41,16 +46,27 @@ int check_id(char* user_id, char* conn_name)
 	FROM	balance
 	WHERE	ID =: user_id;
 
-	return sqlca.sqlcode;
+	if (cnt == 0)
+	{
+		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, db_sid);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+	else if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
 }
 
 DEPOSIT(TPSVCINFO *msg)
 {
-	int ret;
 	int bal, v;
 	char tmp[128];
 	char user_id[16];
 	char my_bank[16];
+	char date[64];
 	char conn_name[16];
 
 	FBUF *rcvbuf, *sndbuf;
@@ -58,32 +74,11 @@ DEPOSIT(TPSVCINFO *msg)
 	sndbuf=(FBUF *)tpalloc("FIELD", NULL,0);
 
 	fbget((FBUF *)(msg->data), MY_ID, user_id, 0);
-	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
 	fbget((FBUF *)(msg->data), AMOUNT, (char *)&v, 0);
+	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
+	fbget((FBUF *)(msg->data), DATE, date, 0);
 
-	ret = connect_db(my_bank, conn_name);
-
-	if (ret != SQLOK)
-	{
-		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, my_bank, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
-
-	ret = check_id(user_id, conn_name);
-
-	if (ret == SQLNOTFOUND)
-	{
-		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, my_bank);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
-	else if (ret != SQLOK)
-	{
-		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
+	access_account(msg, sndbuf, my_bank, conn_name, user_id);
 
 	EXEC SQL AT :conn_name SELECT BALANCE
 	INTO	:bal
@@ -103,6 +98,17 @@ DEPOSIT(TPSVCINFO *msg)
 		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 	}
 
+	EXEC SQL AT :conn_name 
+	INSERT INTO history
+	VALUES ('Deposit', :user_id, '-', :v, to_timestamp(:date, 'yyyy-mm-dd hh24:mi:ss'));
+
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [History cannot be updated (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
 	EXEC SQL AT :conn_name COMMIT WORK RELEASE;
 
 	sprintf(tmp, "[%s] Success [%s's account has been credited with %d (current balance = %d)]", msg->name, user_id, v, bal);
@@ -113,12 +119,12 @@ DEPOSIT(TPSVCINFO *msg)
 
 WITHDRAW(TPSVCINFO *msg)
 {
-	int ret;
 	int bal, v;
 	char tmp[128];
 	char user_id[16];
 	char my_bank[16];
 	char conn_name[16];
+	char date[64];
 
 	FBUF *rcvbuf, *sndbuf;
 	rcvbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
@@ -127,30 +133,9 @@ WITHDRAW(TPSVCINFO *msg)
 	fbget((FBUF *)(msg->data), MY_ID, user_id, 0);
 	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
 	fbget((FBUF *)(msg->data), AMOUNT, (char *)&v, 0);
+	fbget((FBUF *)(msg->data), DATE, date, 0);
 
-	ret = connect_db(my_bank, conn_name);
-
-	if (ret != SQLOK)
-	{
-		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, my_bank, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
-
-	ret = check_id(user_id, conn_name);
-
-	if (ret == SQLNOTFOUND)
-	{
-		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, my_bank);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
-	else if (ret != SQLOK)
-	{
-		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
+	access_account(msg, sndbuf, my_bank, conn_name, user_id);
 
 	EXEC SQL AT :conn_name SELECT BALANCE
 	INTO	:bal
@@ -177,6 +162,17 @@ WITHDRAW(TPSVCINFO *msg)
 		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 	}
 
+	EXEC SQL AT :conn_name 
+	INSERT INTO history
+	VALUES ('Withdrawal', :user_id, '-', :v, to_timestamp(:date, 'yyyy-mm-dd hh24:mi:ss'));
+
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [History cannot be updated (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
 	EXEC SQL AT :conn_name COMMIT WORK RELEASE;
 
 	sprintf(tmp, "[%s] Success [%s's account has been credited with %d ($%d left over)]", msg->name, user_id, v, bal);
@@ -187,16 +183,6 @@ WITHDRAW(TPSVCINFO *msg)
 
 TRANSFER(TPSVCINFO *msg)
 {
-	struct xa_switch_t tbxa1, tbxa2;
-	memcpy(&tbxa1, &tbxasw, sizeof(struct xa_switch_t));
-	memcpy(&tbxa2, &tbxasw, sizeof(struct xa_switch_t));
-
-    XID xid1;
-	XID xid2;
-	long gtrid = 1;
-	long bqual = 1;
-
-	int ret;
 	int bal1, bal2, v;
 	char tmp[128];
 	char user_id[16];
@@ -205,6 +191,7 @@ TRANSFER(TPSVCINFO *msg)
 	char rec_bank[16];
 	char conn_name1[16];
 	char conn_name2[16];
+	char date[64];
 
 	FBUF *rcvbuf, *sndbuf;
 	rcvbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
@@ -215,51 +202,9 @@ TRANSFER(TPSVCINFO *msg)
 	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
 	fbget((FBUF *)(msg->data), REC_BANK, rec_bank, 0);
 	fbget((FBUF *)(msg->data), AMOUNT, (char *)&v, 0);
+	fbget((FBUF *)(msg->data), DATE, date, 0);
 
-	char *conn_str1 = OPENINFO1;
-	char *conn_str2 = OPENINFO2;
-
-	tbxa1.xa_open_entry(conn_str1, 0, TMNOFLAGS);
-    xid1.formatID = 1;
-    xid1.gtrid_length = sizeof(gtrid);
-    xid1.bqual_length = sizeof(bqual);
-    memcpy(&xid1.data[0], &gtrid, sizeof(gtrid));
-    memcpy(&xid1.data[sizeof(gtrid)], &bqual, sizeof(bqual));
-
-	tbxa2.xa_open_entry(conn_str2, 0, TMNOFLAGS);
-    bqual = 2;
-    xid2.formatID = 1;
-    xid2.gtrid_length = sizeof(gtrid);
-    xid2.bqual_length = sizeof(bqual);
-    memcpy(&xid2.data[0], &gtrid, sizeof(gtrid));
-    memcpy(&xid2.data[sizeof(gtrid)], &bqual,
-    sizeof(bqual));
-
-	tbxa1.xa_start_entry (&xid1, 0, TMNOFLAGS);
-
-	ret = connect_db(my_bank, conn_name1);
-
-	if (ret != SQLOK)
-	{
-		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, my_bank, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
-
-	ret = check_id(user_id, conn_name1);
-
-	if (ret == SQLNOTFOUND)
-	{
-		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, my_bank);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
-	else if (ret != SQLOK)
-	{
-		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
+	access_account(msg, sndbuf, my_bank, conn_name1, user_id);
 
 	EXEC SQL AT :conn_name1 SELECT BALANCE
 	INTO	:bal1
@@ -270,8 +215,6 @@ TRANSFER(TPSVCINFO *msg)
 	{
 		sprintf(tmp, "[%s] Failed [%s's account cannot be overdrawn (current balance = %d)]", msg->name, user_id, bal1);
 		fbput(sndbuf, MESSAGE, tmp, 0);
-		tbxa1.xa_close_entry ("", 0, TMNOFLAGS);
-		tbxa2.xa_close_entry ("", 0, TMNOFLAGS);
 		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 	}
 
@@ -288,34 +231,24 @@ TRANSFER(TPSVCINFO *msg)
 		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 	}
 
-    /* xa_end -- */
-    tbxa1.xa_end_entry (&xid1, 0, TMSUCCESS);
+	EXEC SQL AT :conn_name1
+	INSERT INTO history
+	VALUES ('Transfer to', :user_id, :rec_id, :v, to_timestamp(:date, 'yyyy-mm-dd hh24:mi:ss'));
 
-    /* xa_start -- sql statements starts */
-    tbxa2.xa_start_entry (&xid2, 0, TMNOFLAGS);
-
-	ret = connect_db(rec_bank, conn_name2);
-
-	if (ret != SQLOK)
+	if (sqlca.sqlcode != SQLOK)
 	{
-		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, rec_bank, sqlca.sqlerrm.sqlerrmc);
+		sprintf(tmp, "[%s] Failed [History cannot be updated (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
 		fbput(sndbuf, MESSAGE, tmp, 0);
 		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 	}
 
-	ret = check_id(rec_id, conn_name2);
-
-	if (ret == SQLNOTFOUND)
+	if (strcmp(my_bank, rec_bank) != 0)
 	{
-		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, rec_id, rec_bank);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+		access_account(msg, sndbuf, rec_bank, conn_name2, rec_id);
 	}
-	else if (ret != SQLOK)
+	else
 	{
-		sprintf(tmp, "[%s] Failed [recipient ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+		strcpy(conn_name2, conn_name1);
 	}
 
 	EXEC SQL AT :conn_name2 SELECT BALANCE
@@ -336,20 +269,23 @@ TRANSFER(TPSVCINFO *msg)
 		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 	}
 
-    /* xa_end -- */
-    tbxa2.xa_end_entry (&xid2, 0, TMSUCCESS);
+	EXEC SQL AT :conn_name2
+	INSERT INTO history
+	VALUES ('Transfer from', :user_id, :rec_id, :v, to_timestamp(:date, 'yyyy-mm-dd hh24:mi:ss'));
 
-    /* xa_prepare */
-    tbxa1.xa_prepare_entry (&xid1, 0, TMNOFLAGS);
-    tbxa2.xa_prepare_entry (&xid2, 0, TMNOFLAGS);
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [History cannot be updated (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
 
-    /* xa_commit */
-    tbxa1.xa_commit_entry (&xid1, 0, TMNOFLAGS);
-    tbxa2.xa_commit_entry (&xid2, 0, TMNOFLAGS);
+	EXEC SQL AT :conn_name1 COMMIT WORK RELEASE;
 
-    /* xa_close */
-    tbxa1.xa_close_entry ("", 0, TMNOFLAGS);
-	tbxa2.xa_close_entry ("", 0, TMNOFLAGS);
+	if (strcmp(my_bank, rec_bank) != 0)
+	{
+		EXEC SQL AT :conn_name2 COMMIT WORK RELEASE;
+	}
 
 	sprintf(tmp, "[%s] Success [Send $%d to %s ($%d left over)]", msg->name, v, rec_id, bal1);
 	fbput(sndbuf, MESSAGE, tmp, 0);
@@ -373,29 +309,7 @@ BALANCE(TPSVCINFO *msg)
 	fbget((FBUF *)(msg->data), MY_ID, user_id, 0);
 	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
 
-	ret = connect_db(my_bank, conn_name);
-
-	if (ret != SQLOK)
-	{
-		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, my_bank, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
-
-	ret = check_id(user_id, conn_name);
-
-	if (ret == SQLNOTFOUND)
-	{
-		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, my_bank);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
-	else if (ret != SQLOK)
-	{
-		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
-		fbput(sndbuf, MESSAGE, tmp, 0);
-		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
-	}
+	access_account(msg, sndbuf, my_bank, conn_name, user_id);
 
 	EXEC SQL AT :conn_name SELECT BALANCE
 	INTO	:bal
@@ -403,6 +317,75 @@ BALANCE(TPSVCINFO *msg)
 	WHERE	ID =: user_id;
 
 	sprintf(tmp, "[%s] Success [%s's account has %d]", msg->name, user_id, bal);
+	fbput(sndbuf, MESSAGE, tmp, 0);
+
+	tpreturn( TPSUCCESS, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+}
+
+HISTORY(TPSVCINFO *msg)
+{
+	char tmp[MAXLEN];
+	char user_id[16];
+	char my_bank[16];
+	char conn_name[16];
+
+	FBUF *rcvbuf, *sndbuf;
+	rcvbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
+	sndbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
+
+	fbget((FBUF *)(msg->data), MY_ID, user_id, 0);
+	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
+
+	access_account(msg, sndbuf, my_bank, conn_name, user_id);
+
+	EXEC SQL AT :conn_name DECLARE his_cursor CURSOR FOR
+	SELECT DETAIL, RXID, AMOUNT, TM
+	FROM	history
+	WHERE	ID =: user_id;
+
+	EXEC SQL OPEN his_cursor;
+
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [cursor oepn error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	char details[14], rxid[16], date[32], amount[16];
+	char *his = malloc(MAXLEN);
+	int a;
+
+	sprintf(his, "|        Date         |    Details    |   Amount   |    Recipient    |\n"
+				 "----------------------------------------------------------------------\n");
+
+	while(1)
+	{
+		EXEC SQL FETCH his_cursor 
+		INTO :details, :rxid, :a, :date;
+
+		if(sqlca.sqlcode != SQLOK)
+		{
+			if(sqlca.sqlcode == 1403) 
+			{ 
+				break; 
+			} 
+			else 
+			{ 
+				sprintf(tmp, "[%s] Failed [failed to read outputs (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+				fbput(sndbuf, MESSAGE, tmp, 0);
+				tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+			}
+		}
+
+		date[19] = '\0';
+
+		sprintf(his+strlen(his), "| %s | %s | %10d | %s |\n", date, details, a, rxid);
+	}
+
+	sprintf(his+strlen(his), "----------------------------------------------------------------------\n");
+
+	sprintf(tmp, "[%s] Success\n%s", msg->name, his);
 	fbput(sndbuf, MESSAGE, tmp, 0);
 
 	tpreturn( TPSUCCESS, 0, (char *)sndbuf, sizeof(sndbuf), 0 );

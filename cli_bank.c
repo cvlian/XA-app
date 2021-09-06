@@ -3,13 +3,14 @@
  * 
  */
 
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
-#include <lib/atmi.h>
-#include <lib/fbuf.h>
-#include "fdl/bank_fdl.h"
+#include <usrinc/atmi.h>
+#include <usrinc/fbuf.h>
+#include "../fdl/bank_fdl.h"
 
 struct option options[] =
 {
@@ -20,8 +21,8 @@ struct option options[] =
 
 void print_usage()
 {
-	printf("Usage: cli -u [user ID] -b [bank name]\n"
-	"-------------------------\n");
+	printf("\nUsage: cli -u [user ID] -b [bank name]\n"
+	       "--------------------------------------\n\n");
 	exit(0);
 }
 
@@ -29,7 +30,7 @@ void send_call(char* func, FBUF* sndbuf)
 {
 	FBUF *rcvbuf;
 	long rcvlen;
-	char ret[128];
+	char ret[1024];
 
 	if ((rcvbuf = (FBUF *)tpalloc("FIELD", NULL, 0)) == NULL){
 		printf("recvbuf alloc failed !\n");
@@ -53,8 +54,8 @@ main(int argc, char *argv[])
 	FBUF *sndbuf;
 	int	ret;
 
-	char user_id[16];
-	char bank_name[16];
+	char user_id[16] = "";
+	char bank_name[16] = "";
 
 	int optionIndex = 0;
 	char opt = 0;
@@ -78,11 +79,16 @@ main(int argc, char *argv[])
 				break;
 			default:
 				print_usage();
-				exit(-1);
 		}
 	}
 
-	if ( (ret = tmaxreadenv( "bank.env","TMAX" )) == -1 ){
+	if (strlen(user_id) == 0 || strlen(bank_name) == 0)
+	{
+		printf( "Provide your ID and bank name\n" );
+		print_usage();
+	}
+
+	if ( (ret = tmaxreadenv( "tmax.env","TMAX" )) == -1 ){
 		printf( "tmax read env failed\n" );
 		exit(1);
 	}
@@ -102,18 +108,30 @@ main(int argc, char *argv[])
 	int amount;
 	char rec_id[16];
 	char rec_bank[16];
+	char date[64];
 
 	while (1)
 	{
-		printf("\n\nChoose request type from the following list\n"
-		"1: Deposit    2: Withdraw    3: Transfer    4: Check balance\n"
-		"-------------------------\n\n"
-		"Enter (1 ~ 4): ");
+		printf("\nChoose request type from the following list\n"
+		         "-------------------------------------------\n\n"
+		         "1: Deposit     2: Withdraw      3: Transfer\n"
+				 "4: Check balance       5. Check history    \n"
+		         "-------------------------------------------\n\n"
+		         "Enter (1 ~ 5): ");
 
 		scanf("%d", &req_type);
 
 		fbput(sndbuf, MY_ID, user_id, 0);
 		fbput(sndbuf, MY_BANK, bank_name, 0);
+
+		time_t t = time(NULL);
+		struct tm tm = *localtime(&t);
+
+		sprintf(date, "%04d%02d%02d%02d%02d%02d", 
+				tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+       			tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+		fbput(sndbuf, DATE, date, 0);		   
 
 		switch(req_type)
 		{
@@ -142,6 +160,9 @@ main(int argc, char *argv[])
 				break;
 			case 4:
 				send_call("BALANCE", sndbuf);
+				break;
+			case 5:
+				send_call("HISTORY", sndbuf);
 				break;
 			default:
 				printf("You chose invalid number!\n");
