@@ -7,10 +7,9 @@
 #include <sqlca.h>
 #include <stdlib.h>
 #include <string.h>
-#include <usrinc/atmi.h>
-#include <usrinc/fbuf.h>
-#include <usrinc/xa.h>
-#include "../fdl/bank_fdl.h"
+#include <lib/atmi.h>
+#include <lib/fbuf.h>
+#include "fdl/bank_fdl.h"
 
 #define SQLOK       0
 #define SQLDUP      1
