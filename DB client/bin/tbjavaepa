@@ -1,0 +1,58 @@
+#!/bin/sh
+
+prog=`basename $0`
+
+#Classpath
+javaepahome=${TB_HOME}/client/epa/java
+pool=${javaepahome}/lib/commons-pool.jar
+collections=${javaepahome}/lib/commons-collections.jar
+activation=${javaepahome}/lib/activation.jar
+mail=${javaepahome}/lib/mail.jar
+jlexer=${javaepahome}/lib/kuromoji-0.7.7.jar
+log4j=${javaepahome}/lib/log4j-1.2.15.jar
+config=${javaepahome}/config
+epa=${javaepahome}/lib/tbjavaepa.jar
+epa_log_dir=${javaepahome}/log
+epa_console_log=${javaepahome}/log/.epa_console.log
+
+jdbc=${TB_HOME}/client/lib/jar/tibero6-jdbc-14.jar
+logger=${TB_HOME}/client/lib/jar/msllogger-14.jar
+
+#log4j properties
+#log4jfile must be exists on classpath
+log4jfile=epalog.properties
+log4jfile_fullname=${config}/epalog.properties
+# 10 * 60 * 1000
+log4j_refresh_time=600000
+
+#Main Class
+mainclass=com.tmax.tibero.epa.main.EPAMain
+configfile=${javaepahome}/config/epa.cfg
+
+# log
+echo "*****************************************" 
+echo "* Java EPA Start...                     *" 
+date
+echo "*****************************************" 
+
+if [ ! -d $epa_log_dir ]
+then
+    mkdir -p $epa_log_dir
+fi
+
+echo "*****************************************" >> ${epa_console_log}
+echo "* Java EPA Log Start...                 *" >> ${epa_console_log}
+date >> ${epa_console_log}
+echo "*****************************************" >> ${epa_console_log}
+
+# set >> ${epa_console_log}
+echo "exec java -verbose:gc -Xms128m -Xmx512m -Djepa.home=$javaepahome -Dlog4j.configuration=$log4jfile -Dlog4j.configuration.fullname=$log4jfile_fullname -Dlog4j.refresh.time=$log4j_refresh_time -classpath $pool:$collections:$activation:$mail:$logger:$log4j:$jlexer:$jdbc:$epa:$config $mainclass CONFIG=$configfile" >> ${epa_console_log} 
+
+echo "" >> ${epa_console_log}
+
+exec java -verbose:gc -Xms128m -Xmx512m -Djepa.home=$javaepahome -Dlog4j.configuration=$log4jfile -Dlog4j.configuration.fullname=$log4jfile_fullname -Dlog4j.refresh.time=$log4j_refresh_time -classpath $pool:$collections:$activation:$mail:$logger:$log4j:$jlexer:$jdbc:$epa:$config $mainclass CONFIG=$configfile >> ${epa_console_log} 2>&1
+
+# for test.
+# java -verbose:gc -Xms128m -Xmx512m -Djepa.home=$javaepahome -Dlog4j.configuration=$log4jfile -Dlog4j.configuration.fullname=$log4jfile_fullname -Dlog4j.refresh.time=$log4j_refresh_time -classpath $pool:$collections:$activation:$mail:$logger:$log4j:$jdbc:$epa:$config $mainclass CONFIG=$configfile >> ${epa_console_log} 2>&1
+
+echo "exit code : " $? >> ${epa_console_log}

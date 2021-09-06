@@ -1,0 +1,15 @@
+#! /bin/sh
+
+#Classpath
+toolcom=$TB_HOME/client/lib/jar/toolcom.jar
+expimp=$TB_HOME/client/lib/jar/expimp.jar
+jdbc=$TB_HOME/client/lib/jar/internal-jdbc-14.jar
+logger=$TB_HOME/client/lib/jar/msllogger-14.jar
+
+#Main Class
+mainclass=com.m.expimp.importer.ImportMain
+
+#PREV_LANG=$LANG 
+#export LANG=ko_KR.euckr
+java -Xms64m -Xmx512m -classpath $toolcom:$expimp:$jdbc:$logger $mainclass $* 
+#export LANG=$PREV_LANG

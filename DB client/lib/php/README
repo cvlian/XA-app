@@ -1,0 +1,13 @@
+#PHP compile 방법 
+
+(configure하기 전에 gawk가 깔려있어야 합니다.)
+
+$tar xvfz php-4.3.9-patch-tibero.tar.gz
+$cd php-4.3.9
+$./configure --with-odbc --with-tibero
+$make
+$make install
+
+#PHP 실행 방법 
+$php test.php
+

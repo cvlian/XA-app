@@ -1,0 +1,409 @@
+/* svr_bank.tbc
+ *
+ * 
+ */
+
+EXEC SQL INCLUDE svr_bank.h;
+
+int connect_db(char* db_sid, char* conn_name)
+{
+	char username[16];
+	char password[16];
+
+	if (strcmp(db_sid, "bankA") == 0)
+	{
+		sprintf(username, BANKA_DBA_NAME);
+		sprintf(password, BANKA_DBA_PWD);
+		sprintf(conn_name, "bankA");
+	}
+	else if (strcmp(db_sid, "bankB") == 0)
+	{
+		sprintf(username, BANKB_DBA_NAME);
+		sprintf(password, BANKB_DBA_PWD);
+		sprintf(conn_name, "bankB");
+	}
+	else
+	{
+		return ERR_UnknownBANK;
+	}
+
+	EXEC SQL CONNECT :username IDENTIFIED BY :password AT :conn_name USING :db_sid;
+
+	return sqlca.sqlcode;
+}
+
+int check_id(char* user_id, char* conn_name)
+{
+	int cnt;
+
+	EXEC SQL AT :conn_name SELECT COUNT(*)
+	INTO	:cnt
+	FROM	balance
+	WHERE	ID =: user_id;
+
+	return sqlca.sqlcode;
+}
+
+DEPOSIT(TPSVCINFO *msg)
+{
+	int ret;
+	int bal, v;
+	char tmp[128];
+	char user_id[16];
+	char my_bank[16];
+	char conn_name[16];
+
+	FBUF *rcvbuf, *sndbuf;
+	rcvbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
+	sndbuf=(FBUF *)tpalloc("FIELD", NULL,0);
+
+	fbget((FBUF *)(msg->data), MY_ID, user_id, 0);
+	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
+	fbget((FBUF *)(msg->data), AMOUNT, (char *)&v, 0);
+
+	ret = connect_db(my_bank, conn_name);
+
+	if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, my_bank, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	ret = check_id(user_id, conn_name);
+
+	if (ret == SQLNOTFOUND)
+	{
+		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, my_bank);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+	else if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	EXEC SQL AT :conn_name SELECT BALANCE
+	INTO	:bal
+	FROM	balance
+	WHERE	ID =: user_id;
+
+	bal += v;
+
+	EXEC SQL AT :conn_name UPDATE balance
+	SET	BALANCE = :bal
+	WHERE   ID =: user_id;
+
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [failed to update your account (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	EXEC SQL AT :conn_name COMMIT WORK RELEASE;
+
+	sprintf(tmp, "[%s] Success [%s's account has been credited with %d (current balance = %d)]", msg->name, user_id, v, bal);
+	fbput(sndbuf, MESSAGE, tmp, 0);
+
+	tpreturn( TPSUCCESS, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+}
+
+WITHDRAW(TPSVCINFO *msg)
+{
+	int ret;
+	int bal, v;
+	char tmp[128];
+	char user_id[16];
+	char my_bank[16];
+	char conn_name[16];
+
+	FBUF *rcvbuf, *sndbuf;
+	rcvbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
+	sndbuf=(FBUF *)tpalloc("FIELD", NULL,0);
+
+	fbget((FBUF *)(msg->data), MY_ID, user_id, 0);
+	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
+	fbget((FBUF *)(msg->data), AMOUNT, (char *)&v, 0);
+
+	ret = connect_db(my_bank, conn_name);
+
+	if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, my_bank, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	ret = check_id(user_id, conn_name);
+
+	if (ret == SQLNOTFOUND)
+	{
+		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, my_bank);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+	else if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	EXEC SQL AT :conn_name SELECT BALANCE
+	INTO	:bal
+	FROM	balance
+	WHERE	ID =: user_id;
+
+	if (bal < v)
+	{
+		sprintf(tmp, "[%s] Failed [%s's account cannot be overdrawn (current balance = %d)]", msg->name, user_id, bal);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	bal -= v;
+
+	EXEC SQL AT :conn_name UPDATE balance
+	SET	BALANCE = :bal
+	WHERE   ID =: user_id;
+
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [failed to update your account (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	EXEC SQL AT :conn_name COMMIT WORK RELEASE;
+
+	sprintf(tmp, "[%s] Success [%s's account has been credited with %d ($%d left over)]", msg->name, user_id, v, bal);
+	fbput(sndbuf, MESSAGE, tmp, 0);
+
+	tpreturn( TPSUCCESS, 0, (char *)sndbuf, sizeof(sndbuf), 0 );    
+}
+
+TRANSFER(TPSVCINFO *msg)
+{
+	struct xa_switch_t tbxa1, tbxa2;
+	memcpy(&tbxa1, &tbxasw, sizeof(struct xa_switch_t));
+	memcpy(&tbxa2, &tbxasw, sizeof(struct xa_switch_t));
+
+    XID xid1;
+	XID xid2;
+	long gtrid = 1;
+	long bqual = 1;
+
+	int ret;
+	int bal1, bal2, v;
+	char tmp[128];
+	char user_id[16];
+	char rec_id[16];
+	char my_bank[16];
+	char rec_bank[16];
+	char conn_name1[16];
+	char conn_name2[16];
+
+	FBUF *rcvbuf, *sndbuf;
+	rcvbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
+	sndbuf=(FBUF *)tpalloc("FIELD", NULL,0);
+
+	fbget((FBUF *)(msg->data), MY_ID, user_id, 0);
+	fbget((FBUF *)(msg->data), REC_ID, rec_id, 0);
+	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
+	fbget((FBUF *)(msg->data), REC_BANK, rec_bank, 0);
+	fbget((FBUF *)(msg->data), AMOUNT, (char *)&v, 0);
+
+	char *conn_str1 = OPENINFO1;
+	char *conn_str2 = OPENINFO2;
+
+	tbxa1.xa_open_entry(conn_str1, 0, TMNOFLAGS);
+    xid1.formatID = 1;
+    xid1.gtrid_length = sizeof(gtrid);
+    xid1.bqual_length = sizeof(bqual);
+    memcpy(&xid1.data[0], &gtrid, sizeof(gtrid));
+    memcpy(&xid1.data[sizeof(gtrid)], &bqual, sizeof(bqual));
+
+	tbxa2.xa_open_entry(conn_str2, 0, TMNOFLAGS);
+    bqual = 2;
+    xid2.formatID = 1;
+    xid2.gtrid_length = sizeof(gtrid);
+    xid2.bqual_length = sizeof(bqual);
+    memcpy(&xid2.data[0], &gtrid, sizeof(gtrid));
+    memcpy(&xid2.data[sizeof(gtrid)], &bqual,
+    sizeof(bqual));
+
+	tbxa1.xa_start_entry (&xid1, 0, TMNOFLAGS);
+
+	ret = connect_db(my_bank, conn_name1);
+
+	if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, my_bank, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	ret = check_id(user_id, conn_name1);
+
+	if (ret == SQLNOTFOUND)
+	{
+		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, my_bank);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+	else if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	EXEC SQL AT :conn_name1 SELECT BALANCE
+	INTO	:bal1
+	FROM	balance
+	WHERE	ID =: user_id;
+
+	if (bal1 < v)
+	{
+		sprintf(tmp, "[%s] Failed [%s's account cannot be overdrawn (current balance = %d)]", msg->name, user_id, bal1);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tbxa1.xa_close_entry ("", 0, TMNOFLAGS);
+		tbxa2.xa_close_entry ("", 0, TMNOFLAGS);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	bal1 -= v;
+
+	EXEC SQL AT :conn_name1 UPDATE balance
+	SET	BALANCE = :bal1
+	WHERE   ID =: user_id;
+
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [failed to update your account (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+    /* xa_end -- */
+    tbxa1.xa_end_entry (&xid1, 0, TMSUCCESS);
+
+    /* xa_start -- sql statements starts */
+    tbxa2.xa_start_entry (&xid2, 0, TMNOFLAGS);
+
+	ret = connect_db(rec_bank, conn_name2);
+
+	if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, rec_bank, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	ret = check_id(rec_id, conn_name2);
+
+	if (ret == SQLNOTFOUND)
+	{
+		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, rec_id, rec_bank);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+	else if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [recipient ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	EXEC SQL AT :conn_name2 SELECT BALANCE
+	INTO	:bal2
+	FROM	balance
+	WHERE	ID =: rec_id;
+
+	bal2 += v;
+
+	EXEC SQL AT :conn_name2 UPDATE balance
+	SET	BALANCE = :bal2
+	WHERE   ID =: rec_id;
+
+	if (sqlca.sqlcode != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [failed to update recipient's account (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+    /* xa_end -- */
+    tbxa2.xa_end_entry (&xid2, 0, TMSUCCESS);
+
+    /* xa_prepare */
+    tbxa1.xa_prepare_entry (&xid1, 0, TMNOFLAGS);
+    tbxa2.xa_prepare_entry (&xid2, 0, TMNOFLAGS);
+
+    /* xa_commit */
+    tbxa1.xa_commit_entry (&xid1, 0, TMNOFLAGS);
+    tbxa2.xa_commit_entry (&xid2, 0, TMNOFLAGS);
+
+    /* xa_close */
+    tbxa1.xa_close_entry ("", 0, TMNOFLAGS);
+	tbxa2.xa_close_entry ("", 0, TMNOFLAGS);
+
+	sprintf(tmp, "[%s] Success [Send $%d to %s ($%d left over)]", msg->name, v, rec_id, bal1);
+	fbput(sndbuf, MESSAGE, tmp, 0);
+
+	tpreturn( TPSUCCESS, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+}
+
+BALANCE(TPSVCINFO *msg)
+{
+	int ret;
+	int bal;
+	char tmp[128];
+	char user_id[16];
+	char my_bank[16];
+	char conn_name[16];
+
+	FBUF *rcvbuf, *sndbuf;
+	rcvbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
+	sndbuf=(FBUF *)tpalloc("FIELD", NULL, 0);
+
+	fbget((FBUF *)(msg->data), MY_ID, user_id, 0);
+	fbget((FBUF *)(msg->data), MY_BANK, my_bank, 0);
+
+	ret = connect_db(my_bank, conn_name);
+
+	if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [cannot access to %s DB (%s)]", msg->name, my_bank, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	ret = check_id(user_id, conn_name);
+
+	if (ret == SQLNOTFOUND)
+	{
+		sprintf(tmp, "[%s] Failed [%s's account is not registered in %s]", msg->name, user_id, my_bank);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+	else if (ret != SQLOK)
+	{
+		sprintf(tmp, "[%s] Failed [ID verification error (%s)]", msg->name, sqlca.sqlerrm.sqlerrmc);
+		fbput(sndbuf, MESSAGE, tmp, 0);
+		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+	}
+
+	EXEC SQL AT :conn_name SELECT BALANCE
+	INTO	:bal
+	FROM	balance
+	WHERE	ID =: user_id;
+
+	sprintf(tmp, "[%s] Success [%s's account has %d]", msg->name, user_id, bal);
+	fbput(sndbuf, MESSAGE, tmp, 0);
+
+	tpreturn( TPSUCCESS, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
+}

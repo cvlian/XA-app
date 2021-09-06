@@ -1,0 +1,14 @@
+#!/bin/sh
+# program compile
+#
+
+#main
+	Param=$1
+	case "$Param" in
+		c)			COMP_TARGET=$2; export COMP_TARGET
+					make -f Makefile.c;;
+		th)			COMP_TARGET=$2; export COMP_TARGET
+					make -f Makefile.th;;
+		clean)			make -f Makefile.pc clean;;
+		*)			echo "Usage: $0 argument";;
+	esac
