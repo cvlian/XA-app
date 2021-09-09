@@ -271,7 +271,7 @@ TRANSFER(TPSVCINFO *msg)
 
 	EXEC SQL AT :conn_name2
 	INSERT INTO history
-	VALUES ('Transfer from', :user_id, :rec_id, :v, to_timestamp(:date, 'yyyy-mm-dd hh24:mi:ss'));
+	VALUES ('Transfer from', :rec_id, :user_id, :v, to_timestamp(:date, 'yyyy-mm-dd hh24:mi:ss'));
 
 	if (sqlca.sqlcode != SQLOK)
 	{
@@ -352,12 +352,12 @@ HISTORY(TPSVCINFO *msg)
 		tpreturn( TPFAIL, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 	}
 
-	char details[14], rxid[16], date[32], amount[16];
+	char details[14], rxid[18], date[32], amount[16];
 	char *his = malloc(MAXLEN);
 	int a;
 
-	sprintf(his, "|        Date         |    Details    |   Amount   |    Recipient    |\n"
-				 "----------------------------------------------------------------------\n");
+	sprintf(his, "|        Date         |    Details    |   Amount   |    Counterpart    |\n"
+				 "------------------------------------------------------------------------\n");
 
 	while(1)
 	{
@@ -383,10 +383,14 @@ HISTORY(TPSVCINFO *msg)
 		sprintf(his+strlen(his), "| %s | %s | %10d | %s |\n", date, details, a, rxid);
 	}
 
-	sprintf(his+strlen(his), "----------------------------------------------------------------------\n");
+	sprintf(his+strlen(his), "------------------------------------------------------------------------\n");
+
+	EXEC SQL AT :conn_name COMMIT WORK RELEASE;
 
 	sprintf(tmp, "[%s] Success\n%s", msg->name, his);
 	fbput(sndbuf, MESSAGE, tmp, 0);
+
+	free(his);
 
 	tpreturn( TPSUCCESS, 0, (char *)sndbuf, sizeof(sndbuf), 0 );
 }
